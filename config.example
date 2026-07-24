@@ -17,12 +17,13 @@ DICTATE_DEEPSEEK_MODEL=deepseek-v4-flash
 DICTATE_WHISPER_MODEL=base.en
 DICTATE_LANG=en
 
-# Whisper runs on the GPU by default, with the Vulkan loader pinned to
-# the system profile's NVIDIA ICD (a duplicate driver build in the home
-# profile otherwise gets loaded alongside it and segfaults the process).
-# Set to 0 to force CPU inference.
+# Whisper runs on the GPU by default. On Guix the Vulkan loader is pinned
+# to the system profile's NVIDIA ICD (a duplicate driver build in the
+# home profile otherwise gets loaded alongside it and segfaults the
+# process); on FHS distros the loader's stock driver discovery is left
+# alone. Set to 0 to force CPU inference.
 #DICTATE_GPU=0
 
-# Pin a different Vulkan ICD JSON instead of the NVIDIA default, e.g.
-# radeon_icd.x86_64.json on an AMD box. Missing file = CPU fallback.
-#DICTATE_VK_ICD=/run/current-system/profile/share/vulkan/icd.d/radeon_icd.x86_64.json
+# Pin the loader to one specific Vulkan ICD JSON instead of the behavior
+# above, e.g. to select a GPU or dodge a broken driver.
+#DICTATE_VK_ICD=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json

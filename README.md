@@ -80,10 +80,12 @@ with all of these on PATH.
   system and home profiles; when the two profiles carry different builds
   of the driver, both copies get dlopened into one process and it
   segfaults (`vulkaninfo` crashes the same way — it was never a ggml
-  bug). The script pins the loader to the system profile's ICD around
-  `whisper-cli` (`/run/current-system` is a stable indirection, so the
-  pin survives reconfigures); `DICTATE_VK_ICD` selects another driver,
-  `DICTATE_GPU=0` forces CPU, and a missing ICD file falls back to CPU.
+  bug). On Guix the script therefore pins the loader to the system
+  profile's ICD around `whisper-cli` (`/run/current-system` is a stable
+  indirection, so the pin survives reconfigures); on other distros, which
+  keep a single `icd.d`, the loader's stock discovery is left untouched.
+  `DICTATE_VK_ICD` pins one explicit ICD on any distro, `DICTATE_GPU=0`
+  forces CPU.
 - Latency knobs: on GPU the model is nearly free (`base.en` encodes a
   5-second take in ~20 ms on an RTX 3060 Ti vs ~8.5 s on CPU), so
   `small.en` is an affordable accuracy upgrade; on CPU `base.en` is the
