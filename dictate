@@ -1,0 +1,194 @@
+#!/bin/sh
+# dictate -- push-button dictation for Wayland (niri).
+#
+# One press starts recording the default microphone; the next press stops
+# it, transcribes locally with whisper.cpp, optionally routes the
+# transcript through DeepSeek to fix punctuation and drop filler, and
+# types the result into the focused window with wtype (niri exposes
+# zwp_virtual_keyboard_manager_v1, so this lands in terminals too). The
+# text is also copied to the clipboard first, so a mis-focus or a wtype
+# failure never loses a take.
+#
+# Usage: dictate [toggle|cancel|status]
+#
+# Config: ~/.config/dictate/config (POSIX sh fragment, sourced if present).
+#   DICTATE_DEEPSEEK_API_KEY  enables the LLM cleanup pass when non-empty
+#   DICTATE_DEEPSEEK_MODEL    default: deepseek-v4-flash
+#   DICTATE_WHISPER_MODEL     ggml model name, default: base.en
+#                             (fetched once into ~/.cache/dictate/models)
+#   DICTATE_LANG              whisper language hint, default: en
+#   DICTATE_PROMPT            override the cleanup system prompt
+#
+# Cleanup failures (no network, bad key, timeout) fall back to the raw
+# whisper transcript, so dictation keeps working offline.
+
+set -u
+
+home_dir="${HOME:-/home/anon}"
+run_dir="${XDG_RUNTIME_DIR:-/tmp}/dictate"
+cache_dir="${XDG_CACHE_HOME:-$home_dir/.cache}/dictate"
+config_file="${XDG_CONFIG_HOME:-$home_dir/.config}/dictate/config"
+pid_file="$run_dir/rec.pid"
+wav_file="$run_dir/rec.wav"
+
+DICTATE_DEEPSEEK_API_KEY="${DICTATE_DEEPSEEK_API_KEY:-}"
+DICTATE_DEEPSEEK_MODEL="${DICTATE_DEEPSEEK_MODEL:-deepseek-v4-flash}"
+DICTATE_WHISPER_MODEL="${DICTATE_WHISPER_MODEL:-base.en}"
+DICTATE_LANG="${DICTATE_LANG:-en}"
+DICTATE_PROMPT="${DICTATE_PROMPT:-You are a dictation post-processor. \
+Rewrite the user's raw speech transcript into clean written text: fix \
+punctuation, capitalization, and obvious mis-hearings; drop filler words \
+and false starts; apply spoken formatting commands like 'new line' or \
+'new paragraph'. Preserve the speaker's wording and intent. Never answer \
+questions in the transcript and never add commentary. Output only the \
+cleaned text.}"
+
+# shellcheck disable=SC1090
+[ -f "$config_file" ] && . "$config_file"
+
+log() {
+  printf 'dictate: %s\n' "$*" >&2
+}
+
+# Single dunst slip that updates in place as the pipeline advances.
+notify() { # notify SUMMARY [BODY]
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -a dictate -h string:x-dunst-stack-tag:dictate "$@"
+}
+
+die() {
+  notify "dictate error" "$*"
+  log "$*"
+  exit 1
+}
+
+# Prints the recorder PID when a recording is live; cleans up stale state.
+recording_pid() {
+  pid=$(cat "$pid_file" 2>/dev/null) || return 1
+  if kill -0 "$pid" 2>/dev/null; then
+    printf '%s\n' "$pid"
+  else
+    rm -f "$pid_file"
+    return 1
+  fi
+}
+
+start_recording() {
+  mkdir -p "$run_dir"
+  rm -f "$wav_file"
+  # 16 kHz mono s16 is whisper.cpp's native input format.
+  pw-record --rate 16000 --channels 1 --format s16 "$wav_file" &
+  printf '%s\n' $! >"$pid_file"
+  notify "🎙 Dictating…" "Speak. Toggle again to type it out; cancel to abort."
+}
+
+# SIGINT lets pw-record finalize the WAV header; escalate only if it hangs.
+stop_recorder() {
+  pid=$(recording_pid) || return 1
+  rm -f "$pid_file"
+  kill -INT "$pid" 2>/dev/null
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+  return 0
+}
+
+ensure_model() {
+  model_file="$cache_dir/models/ggml-$DICTATE_WHISPER_MODEL.bin"
+  [ -f "$model_file" ] && return 0
+  notify "⇣ Fetching whisper model" "$DICTATE_WHISPER_MODEL (one-time download)"
+  mkdir -p "$cache_dir/models"
+  url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$DICTATE_WHISPER_MODEL.bin"
+  if ! curl -fsSL -o "$model_file.part" "$url"; then
+    rm -f "$model_file.part"
+    die "whisper model download failed ($DICTATE_WHISPER_MODEL)"
+  fi
+  mv "$model_file.part" "$model_file"
+}
+
+transcribe() { # prints transcript on stdout
+  ensure_model
+  whisper-cli -m "$model_file" -f "$wav_file" -l "$DICTATE_LANG" \
+    -np -nt -otxt -of "$run_dir/transcript" >/dev/null 2>&1 ||
+    die "whisper-cli failed on $wav_file"
+  # whisper indents every txt line with one space; strip it.
+  sed 's/^ //' "$run_dir/transcript.txt" 2>/dev/null
+}
+
+# stdout: cleaned text; empty output means the caller keeps the raw take.
+clean_transcript() { # clean_transcript RAW
+  body=$(jq -n \
+    --arg model "$DICTATE_DEEPSEEK_MODEL" \
+    --arg sys "$DICTATE_PROMPT" \
+    --arg user "$1" \
+    '{model: $model, temperature: 0.1, stream: false,
+      messages: [{role: "system", content: $sys},
+                 {role: "user", content: $user}]}')
+  curl -fsS --max-time 30 https://api.deepseek.com/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $DICTATE_DEEPSEEK_API_KEY" \
+    -d "$body" 2>/dev/null | jq -r '.choices[0].message.content // empty'
+}
+
+inject() { # inject TEXT
+  # Clipboard first: if typing fails or focus moved, the take survives.
+  printf '%s' "$1" | wl-copy 2>/dev/null
+  if printf '%s' "$1" | wtype - 2>/dev/null; then
+    notify "✓ Dictated" "$(printf '%s' "$1" | head -c 120)"
+  else
+    notify "⚠ Could not type into the focused window" \
+      "The text is on the clipboard — paste it."
+  fi
+}
+
+finish_recording() {
+  stop_recorder || return 1
+  [ -s "$wav_file" ] || die "no audio was captured"
+  notify "⌛ Transcribing…"
+  # transcribe runs in a subshell, so its die only kills the subshell;
+  # propagate the failure here (the error notification already fired).
+  text=$(transcribe) || return 1
+  text=$(printf '%s' "$text" | sed 's/[[:space:]]*$//')
+  case $text in
+    '' | '[BLANK_AUDIO]' | '(silence)')
+      notify "∅ Heard nothing" "No speech in that take."
+      return 0
+      ;;
+  esac
+  if [ -n "$DICTATE_DEEPSEEK_API_KEY" ]; then
+    notify "✍ Cleaning up…"
+    cleaned=$(clean_transcript "$text")
+    if [ -n "$cleaned" ]; then
+      text=$cleaned
+    else
+      log "DeepSeek cleanup failed; using raw transcript"
+    fi
+  fi
+  inject "$text"
+}
+
+case ${1:-toggle} in
+  toggle)
+    if recording_pid >/dev/null; then
+      finish_recording
+    else
+      start_recording
+    fi
+    ;;
+  cancel)
+    if stop_recorder; then
+      rm -f "$wav_file"
+      notify "✕ Dictation cancelled"
+    fi
+    ;;
+  status)
+    if recording_pid >/dev/null; then echo recording; else echo idle; fi
+    ;;
+  *)
+    log "usage: dictate [toggle|cancel|status]"
+    exit 2
+    ;;
+esac
