@@ -18,8 +18,10 @@
 #                             (fetched once into ~/.cache/dictate/models)
 #   DICTATE_LANG              whisper language hint, default: en
 #   DICTATE_PROMPT            override the cleanup system prompt
-#   DICTATE_GPU               1 = let ggml use Vulkan (default off: the
-#                             NVIDIA ICD segfaults whisper-cli)
+#   DICTATE_GPU               0 = force CPU inference (default: GPU, with
+#                             the Vulkan loader pinned to one NVIDIA ICD)
+#   DICTATE_VK_ICD            Vulkan ICD JSON to pin instead of the system
+#                             profile's NVIDIA one (e.g. for AMD/Intel)
 #
 # Cleanup failures (no network, bad key, timeout) fall back to the raw
 # whisper transcript, so dictation keeps working offline.
@@ -120,13 +122,23 @@ ensure_model() {
 
 transcribe() { # prints transcript on stdout
   ensure_model
-  # ggml dlopens its Vulkan backend at startup, and the NVIDIA Vulkan ICD
-  # segfaults whisper-cli on sight (even --help, even with the session
-  # env). Hide the ICDs so whisper stays on CPU; DICTATE_GPU=1 opts back
-  # in if the driver ever behaves.
-  vk_guard="VK_DRIVER_FILES=/dev/null VK_ICD_FILENAMES=/dev/null"
-  [ "${DICTATE_GPU:-0}" = 1 ] && vk_guard=""
-  env $vk_guard whisper-cli -m "$model_file" -f "$wav_file" -l "$DICTATE_LANG" \
+  # The segfault that once forced CPU here was never the NVIDIA driver
+  # itself: Guix ships a Vulkan ICD for it in both the system and home
+  # profiles, and when the two profiles hold different builds of the same
+  # driver the loader dlopens both copies into one process and crashes
+  # (vulkaninfo too, not just ggml). Pinning the loader to the system
+  # profile's ICD alone makes the GPU work; DICTATE_GPU=0 forces CPU.
+  # /run/current-system is Guix's stable indirection, re-pointed on every
+  # reconfigure, so the default never dangles on a store path. Pinning one
+  # file (not the whole icd.d) also keeps llvmpipe out of ggml's device
+  # list. DICTATE_VK_ICD swaps in a different driver.
+  vk_icd="${DICTATE_VK_ICD:-/run/current-system/profile/share/vulkan/icd.d/nvidia_icd.x86_64.json}"
+  if [ "${DICTATE_GPU:-1}" != 0 ] && [ -f "$vk_icd" ]; then
+    vk_pin="VK_DRIVER_FILES=$vk_icd VK_ICD_FILENAMES=$vk_icd"
+  else
+    vk_pin="VK_DRIVER_FILES=/dev/null VK_ICD_FILENAMES=/dev/null"
+  fi
+  env -u VK_ADD_DRIVER_FILES $vk_pin whisper-cli -m "$model_file" -f "$wav_file" -l "$DICTATE_LANG" \
     -np -nt -otxt -of "$run_dir/transcript" >/dev/null 2>&1 ||
     die "whisper-cli failed on $wav_file"
   # whisper indents every txt line with one space; strip it.

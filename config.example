@@ -12,10 +12,17 @@ DICTATE_DEEPSEEK_API_KEY=
 DICTATE_DEEPSEEK_MODEL=deepseek-v4-flash
 
 # Whisper ggml model, auto-downloaded to ~/.cache/dictate/models on first
-# use. base.en is fast; small.en is more accurate and still fine on CPU.
+# use. base.en is fast; small.en is more accurate (and effectively free
+# on GPU).
 DICTATE_WHISPER_MODEL=base.en
 DICTATE_LANG=en
 
-# Whisper runs on CPU by default: ggml's Vulkan backend crashes against
-# the NVIDIA ICD on some drivers. Set to 1 to try GPU inference.
-#DICTATE_GPU=1
+# Whisper runs on the GPU by default, with the Vulkan loader pinned to
+# the system profile's NVIDIA ICD (a duplicate driver build in the home
+# profile otherwise gets loaded alongside it and segfaults the process).
+# Set to 0 to force CPU inference.
+#DICTATE_GPU=0
+
+# Pin a different Vulkan ICD JSON instead of the NVIDIA default, e.g.
+# radeon_icd.x86_64.json on an AMD box. Missing file = CPU fallback.
+#DICTATE_VK_ICD=/run/current-system/profile/share/vulkan/icd.d/radeon_icd.x86_64.json

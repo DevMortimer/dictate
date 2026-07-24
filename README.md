@@ -75,11 +75,17 @@ with all of these on PATH.
   only say "new line" when you mean it.
 - If typing fails (e.g. focus landed somewhere odd), the take is still on
   the clipboard.
-- Whisper runs on CPU by default. ggml dlopens its Vulkan backend at
-  startup and the NVIDIA Vulkan ICD segfaults the process on some
-  drivers, so the script hides Vulkan ICDs around `whisper-cli`;
-  `DICTATE_GPU=1` opts back in.
-- Latency knobs: `base.en` is the speed/accuracy sweet spot on CPU;
-  `small.en` is noticeably better and still tolerable. whisper.cpp also
-  ships `whisper-server` — a future upgrade is keeping the model warm in
-  a daemon and pointing this script at it.
+- Whisper runs on the GPU (Vulkan) by default. On Guix with the nonguix
+  NVIDIA driver, the Vulkan loader can discover NVIDIA ICDs from both the
+  system and home profiles; when the two profiles carry different builds
+  of the driver, both copies get dlopened into one process and it
+  segfaults (`vulkaninfo` crashes the same way — it was never a ggml
+  bug). The script pins the loader to the system profile's ICD around
+  `whisper-cli` (`/run/current-system` is a stable indirection, so the
+  pin survives reconfigures); `DICTATE_VK_ICD` selects another driver,
+  `DICTATE_GPU=0` forces CPU, and a missing ICD file falls back to CPU.
+- Latency knobs: on GPU the model is nearly free (`base.en` encodes a
+  5-second take in ~20 ms on an RTX 3060 Ti vs ~8.5 s on CPU), so
+  `small.en` is an affordable accuracy upgrade; on CPU `base.en` is the
+  sweet spot. whisper.cpp also ships `whisper-server` — a future upgrade
+  is keeping the model warm in a daemon and pointing this script at it.
