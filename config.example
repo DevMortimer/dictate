@@ -1,0 +1,17 @@
+# dictate configuration -- copy to ~/.config/dictate/config.
+# POSIX sh fragment, sourced by the dictate script.
+
+# DeepSeek key for the LLM cleanup pass. Either set it inline here (only
+# if this file stays private) or leave it empty and put the bare key in
+# ~/.config/dictate/deepseek-key (chmod 600) -- the script falls back to
+# that file. Empty/absent key = raw whisper transcript is typed as-is.
+DICTATE_DEEPSEEK_API_KEY=
+
+# deepseek-v4-flash is the fast/cheap one; deepseek-v4-pro for heavier
+# rewriting. (deepseek-chat was deprecated 2026-07-24.)
+DICTATE_DEEPSEEK_MODEL=deepseek-v4-flash
+
+# Whisper ggml model, auto-downloaded to ~/.cache/dictate/models on first
+# use. base.en is fast; small.en is more accurate and still fine on CPU.
+DICTATE_WHISPER_MODEL=base.en
+DICTATE_LANG=en

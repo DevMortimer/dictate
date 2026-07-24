@@ -35,7 +35,8 @@ cramped pinky.
 
 ## Config
 
-`~/.config/dictate/config` — a POSIX sh fragment, sourced if present:
+`~/.config/dictate/config` — a POSIX sh fragment, sourced if present
+(see `config.example`):
 
 ```sh
 DICTATE_DEEPSEEK_API_KEY=sk-...        # empty/absent = no LLM cleanup
@@ -45,7 +46,11 @@ DICTATE_LANG=en
 # DICTATE_PROMPT="..."                 # override the cleanup prompt
 ```
 
-Keep the key file out of any public dotfiles repo.
+If `DICTATE_DEEPSEEK_API_KEY` is empty, the script falls back to reading
+the bare key from `~/.config/dictate/deepseek-key` (chmod 600). Use that
+file when the config itself is tracked in dotfiles — on Guix Home,
+deployed dotfiles pass through the world-readable store, so the secret
+must stay in the untracked key file.
 
 ## niri integration
 

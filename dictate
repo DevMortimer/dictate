@@ -46,6 +46,13 @@ cleaned text.}"
 # shellcheck disable=SC1090
 [ -f "$config_file" ] && . "$config_file"
 
+# Fall back to the untracked key file so a config tracked in public
+# dotfiles (and deployed via the world-readable Guix store) never has to
+# carry the secret itself.
+if [ -z "$DICTATE_DEEPSEEK_API_KEY" ]; then
+  DICTATE_DEEPSEEK_API_KEY=$(cat "${XDG_CONFIG_HOME:-$home_dir/.config}/dictate/deepseek-key" 2>/dev/null || true)
+fi
+
 log() {
   printf 'dictate: %s\n' "$*" >&2
 }
