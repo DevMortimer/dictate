@@ -15,3 +15,7 @@ DICTATE_DEEPSEEK_MODEL=deepseek-v4-flash
 # use. base.en is fast; small.en is more accurate and still fine on CPU.
 DICTATE_WHISPER_MODEL=base.en
 DICTATE_LANG=en
+
+# Whisper runs on CPU by default: ggml's Vulkan backend crashes against
+# the NVIDIA ICD on some drivers. Set to 1 to try GPU inference.
+#DICTATE_GPU=1

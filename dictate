@@ -18,6 +18,8 @@
 #                             (fetched once into ~/.cache/dictate/models)
 #   DICTATE_LANG              whisper language hint, default: en
 #   DICTATE_PROMPT            override the cleanup system prompt
+#   DICTATE_GPU               1 = let ggml use Vulkan (default off: the
+#                             NVIDIA ICD segfaults whisper-cli)
 #
 # Cleanup failures (no network, bad key, timeout) fall back to the raw
 # whisper transcript, so dictation keeps working offline.
@@ -118,7 +120,13 @@ ensure_model() {
 
 transcribe() { # prints transcript on stdout
   ensure_model
-  whisper-cli -m "$model_file" -f "$wav_file" -l "$DICTATE_LANG" \
+  # ggml dlopens its Vulkan backend at startup, and the NVIDIA Vulkan ICD
+  # segfaults whisper-cli on sight (even --help, even with the session
+  # env). Hide the ICDs so whisper stays on CPU; DICTATE_GPU=1 opts back
+  # in if the driver ever behaves.
+  vk_guard="VK_DRIVER_FILES=/dev/null VK_ICD_FILENAMES=/dev/null"
+  [ "${DICTATE_GPU:-0}" = 1 ] && vk_guard=""
+  env $vk_guard whisper-cli -m "$model_file" -f "$wav_file" -l "$DICTATE_LANG" \
     -np -nt -otxt -of "$run_dir/transcript" >/dev/null 2>&1 ||
     die "whisper-cli failed on $wav_file"
   # whisper indents every txt line with one space; strip it.
@@ -160,7 +168,8 @@ finish_recording() {
   text=$(transcribe) || return 1
   text=$(printf '%s' "$text" | sed 's/[[:space:]]*$//')
   case $text in
-    '' | '[BLANK_AUDIO]' | '(silence)')
+    # includes whisper's notorious silence hallucinations
+    '' | '[BLANK_AUDIO]' | '(silence)' | 'you' | 'You' | 'Thank you.' | 'Thanks for watching!')
       notify "∅ Heard nothing" "No speech in that take."
       return 0
       ;;

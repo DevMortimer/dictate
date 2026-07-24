@@ -75,6 +75,10 @@ with all of these on PATH.
   only say "new line" when you mean it.
 - If typing fails (e.g. focus landed somewhere odd), the take is still on
   the clipboard.
+- Whisper runs on CPU by default. ggml dlopens its Vulkan backend at
+  startup and the NVIDIA Vulkan ICD segfaults the process on some
+  drivers, so the script hides Vulkan ICDs around `whisper-cli`;
+  `DICTATE_GPU=1` opts back in.
 - Latency knobs: `base.en` is the speed/accuracy sweet spot on CPU;
   `small.en` is noticeably better and still tolerable. whisper.cpp also
   ships `whisper-server` — a future upgrade is keeping the model warm in
