@@ -11,10 +11,13 @@ The pipeline, one keybind end to end:
 2. **Transcribe** — `whisper-cli` (whisper.cpp) runs locally; the ggml
    model is auto-downloaded to `~/.cache/dictate/models` on first use.
 3. **Clean** — the raw transcript goes to DeepSeek `/chat/completions`
-   with a system prompt that fixes punctuation, drops filler and false
-   starts, and applies spoken commands like "new line". Skipped when no
-   API key is configured; any failure falls back to the raw transcript,
-   so dictation works offline.
+   with a typist system prompt: phrase by phrase it judges whether you
+   were speaking *for the page* or *to the typist*, so spoken spellings
+   ("D-O-T files, one word"), corrections ("no, wait, I mean…"),
+   retractions ("scratch that") and formatting commands ("new line") are
+   executed rather than transcribed, while filler and false starts are
+   dropped. Skipped when no API key is configured; any failure falls
+   back to the raw transcript, so dictation works offline.
 4. **Inject** — the text is copied to the clipboard (backup), then typed
    into the focused window with `wtype`, which uses the
    `zwp_virtual_keyboard_manager_v1` protocol niri exposes — so it works
