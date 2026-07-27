@@ -17,6 +17,10 @@ DICTATE_DEEPSEEK_MODEL=deepseek-v4-flash
 DICTATE_WHISPER_MODEL=base.en
 DICTATE_LANG=en
 
+# Both settings below are Linux-only and ignored on macOS, where
+# whisper.cpp uses Metal: there is no loader to confuse, no ICD to pin,
+# and inference is always accelerated.
+
 # Whisper runs on the GPU by default. On Guix the Vulkan loader is pinned
 # to the system profile's NVIDIA ICD (a duplicate driver build in the
 # home profile otherwise gets loaded alongside it and segfaults the

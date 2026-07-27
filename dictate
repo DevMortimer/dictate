@@ -1,13 +1,18 @@
 #!/bin/sh
-# dictate -- push-button dictation for Wayland (niri).
+# dictate -- push-button dictation for Wayland (niri) and macOS.
 #
 # One press starts recording the default microphone; the next press stops
 # it, transcribes locally with whisper.cpp, optionally routes the
 # transcript through DeepSeek to fix punctuation and drop filler, and
-# types the result into the focused window with wtype (niri exposes
-# zwp_virtual_keyboard_manager_v1, so this lands in terminals too). The
-# text is also copied to the clipboard first, so a mis-focus or a wtype
-# failure never loses a take.
+# delivers the result to the focused window.
+#
+# Delivery is where the two platforms part company, deliberately. On
+# Linux the text is copied to the clipboard and then typed with wtype
+# (niri exposes zwp_virtual_keyboard_manager_v1, so this lands in
+# terminals too), the clipboard being the backup if focus moved. On
+# macOS there is no way to synthesize input without an Accessibility
+# grant, so the take is only copied and you press Cmd-V yourself; see
+# docs/adr/0001-macos-support.md.
 #
 # Usage: dictate [toggle|cancel|status]
 #
@@ -19,17 +24,36 @@
 #   DICTATE_LANG              whisper language hint, default: en
 #   DICTATE_PROMPT            override the cleanup system prompt
 #   DICTATE_GPU               0 = force CPU inference (default: GPU)
+#                             Linux only; macOS always uses Metal
 #   DICTATE_VK_ICD            Vulkan ICD JSON to pin the loader to
 #                             (default: Guix's system-profile NVIDIA ICD
 #                             when present, stock discovery elsewhere)
+#                             Linux only; ignored on macOS
 #
 # Cleanup failures (no network, bad key, timeout) fall back to the raw
 # whisper transcript, so dictation keeps working offline.
 
 set -u
 
+platform=$(uname)
+
 home_dir="${HOME:-/home/anon}"
-run_dir="${XDG_RUNTIME_DIR:-/tmp}/dictate"
+# XDG_RUNTIME_DIR is a per-user directory already; the /tmp fallback
+# (Linux without systemd) is shared and world-writable, so name it
+# per-uid rather than let two users collide on one pid file.
+#
+# macOS ignores XDG_RUNTIME_DIR on purpose. It is no system facility
+# there, only a convention a shell profile may invent -- and skhd runs
+# under launchd, which reads no profile. Honouring it would put the
+# hotkey's state in one directory and the terminal's in another, so a
+# recording started with Cmd-D would read as idle from a shell, and
+# toggling there would start a second recorder instead of stopping the
+# first. The pid file must not depend on who did the launching.
+if [ "$platform" != Darwin ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  run_dir="$XDG_RUNTIME_DIR/dictate"
+else
+  run_dir="/tmp/dictate-$(id -u)"
+fi
 cache_dir="${XDG_CACHE_HOME:-$home_dir/.cache}/dictate"
 config_file="${XDG_CONFIG_HOME:-$home_dir/.config}/dictate/config"
 pid_file="$run_dir/rec.pid"
@@ -101,8 +125,21 @@ log() {
   printf 'dictate: %s\n' "$*" >&2
 }
 
-# Single dunst slip that updates in place as the pipeline advances.
+# Linux: a single dunst slip that updates in place as the pipeline
+# advances. macOS: Notification Center has no stack-tag equivalent, so
+# each stage posts its own banner and they pile up -- accepted, since the
+# progress is worth more than the tidiness. The argv form is not
+# decoration: transcripts land in the body, and osascript -e with the
+# text interpolated would break on the first quote or backslash spoken.
 notify() { # notify SUMMARY [BODY]
+  if [ "$platform" = Darwin ]; then
+    osascript \
+      -e 'on run argv' \
+      -e 'display notification (item 1 of argv) with title "dictate" subtitle (item 2 of argv)' \
+      -e 'end run' \
+      -- "${2:-}" "$1" >/dev/null 2>&1
+    return 0
+  fi
   command -v notify-send >/dev/null 2>&1 || return 0
   notify-send -a dictate -h string:x-dunst-stack-tag:dictate "$@"
 }
@@ -128,12 +165,27 @@ start_recording() {
   mkdir -p "$run_dir"
   rm -f "$wav_file"
   # 16 kHz mono s16 is whisper.cpp's native input format.
-  pw-record --rate 16000 --channels 1 --format s16 "$wav_file" &
+  if [ "$platform" = Darwin ]; then
+    command -v ffmpeg >/dev/null 2>&1 ||
+      die "ffmpeg is required to record on macOS (brew install ffmpeg)"
+    # avfoundation's ":default" follows the system default input, which
+    # is what pw-record does on Linux; a device index would freeze the
+    # choice and shift whenever a device is plugged in. -nostdin because
+    # this runs backgrounded and ffmpeg would otherwise eat the terminal.
+    ffmpeg -nostdin -hide_banner -loglevel error \
+      -f avfoundation -i ":default" \
+      -ar 16000 -ac 1 -c:a pcm_s16le -y "$wav_file" >/dev/null 2>&1 &
+    hint="Speak. Toggle again to transcribe and copy; cancel to abort."
+  else
+    pw-record --rate 16000 --channels 1 --format s16 "$wav_file" &
+    hint="Speak. Toggle again to type it out; cancel to abort."
+  fi
   printf '%s\n' $! >"$pid_file"
-  notify "🎙 Dictating…" "Speak. Toggle again to type it out; cancel to abort."
+  notify "🎙 Dictating…" "$hint"
 }
 
-# SIGINT lets pw-record finalize the WAV header; escalate only if it hangs.
+# SIGINT lets the recorder finalize the WAV header -- both pw-record and
+# ffmpeg do; escalate only if it hangs.
 stop_recorder() {
   pid=$(recording_pid) || return 1
   rm -f "$pid_file"
@@ -173,9 +225,14 @@ transcribe() { # prints transcript on stdout
   # distros keep a single icd.d, so none of this applies there and the
   # loader's stock discovery is left untouched. DICTATE_VK_ICD pins an
   # explicit ICD on any distro; DICTATE_GPU=0 forces CPU.
+  # None of it applies on macOS: whisper.cpp uses Metal there, which has
+  # no loader to confuse and no ICD to pin, so DICTATE_GPU and
+  # DICTATE_VK_ICD are both ignored and inference is always accelerated.
   guix_nvidia_icd=/run/current-system/profile/share/vulkan/icd.d/nvidia_icd.x86_64.json
   vk_env=""
-  if [ "${DICTATE_GPU:-1}" = 0 ]; then
+  if [ "$platform" = Darwin ]; then
+    : # Metal: no loader to steer, so leave the environment alone.
+  elif [ "${DICTATE_GPU:-1}" = 0 ]; then
     vk_env="VK_DRIVER_FILES=/dev/null VK_ICD_FILENAMES=/dev/null"
   elif [ -f "${DICTATE_VK_ICD:-}" ]; then
     vk_env="-u VK_ADD_DRIVER_FILES VK_DRIVER_FILES=$DICTATE_VK_ICD VK_ICD_FILENAMES=$DICTATE_VK_ICD"
@@ -206,7 +263,19 @@ clean_transcript() { # clean_transcript RAW
     -d "$body" 2>/dev/null | jq -r '.choices[0].message.content // empty'
 }
 
-inject() { # inject TEXT
+# "deliver" rather than "inject": on macOS nothing is injected anywhere.
+deliver() { # deliver TEXT
+  # macOS stops at the clipboard. Synthesizing the paste would mean
+  # driving System Events, which needs an Accessibility grant plus an
+  # Automation grant attributed to whatever launched this (skhd, under
+  # launchd, where the consent dialog is easily missed) -- and a silently
+  # denied grant looks exactly like the tool being broken. Copying always
+  # works, needs no permission, and lets you pick the destination window.
+  if [ "$platform" = Darwin ]; then
+    printf '%s' "$1" | pbcopy
+    notify "✓ Copied — press ⌘V" "$(printf '%s' "$1" | head -c 120)"
+    return 0
+  fi
   # Clipboard first: if typing fails or focus moved, the take survives.
   printf '%s' "$1" | wl-copy 2>/dev/null
   if printf '%s' "$1" | wtype - 2>/dev/null; then
@@ -241,7 +310,7 @@ finish_recording() {
       log "DeepSeek cleanup failed; using raw transcript"
     fi
   fi
-  inject "$text"
+  deliver "$text"
 }
 
 case ${1:-toggle} in
